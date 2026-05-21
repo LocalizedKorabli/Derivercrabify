@@ -1,0 +1,7 @@
+node_modules/
+build/
+.svelte-kit/
+.env*
+*.tauri
+src-tauri/target/
+locale-updater/target/

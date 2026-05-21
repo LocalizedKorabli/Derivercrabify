@@ -11,8 +11,6 @@ use std::io::Read;
 
 const PATCHES_CHAIN_URL: &str = "https://wgus-eu.wargaming.net/api/v1/patches_chain/?game_id=WOWS.WW.PRODUCTION&protocol_version=1.11&metadata_version=20251121135024&metadata_protocol_version=7.10&client_type=high&lang=ZH_SG&chain_id=f21&game_installation=false&gc_publisher=wargaming&client_current_version=0&hotfix_current_version=0&locale_current_version=0&sdcontent_current_version=0";
 
-const MO_MAGIC: u32 = 0x950412de;
-
 // ---------------------------------------------------------------------------
 // XML deserialization structures
 // ---------------------------------------------------------------------------
@@ -251,7 +249,7 @@ fn download_and_extract_mo(dspkg_url: &str) -> Result<Vec<u8>, String> {
         }
         buf.extend_from_slice(&chunk[..n]);
         downloaded += n as u64;
-        if total > 0 && downloaded % (total.max(1) / 10) < 65536 {
+        if total > 0 && downloaded - (downloaded / (total / 10) * (total / 10)) < 65536 {
             eprintln!("  {}/{} bytes ({:.0}%)", downloaded, total,
                 downloaded as f64 / total as f64 * 100.0);
         }
@@ -260,36 +258,50 @@ fn download_and_extract_mo(dspkg_url: &str) -> Result<Vec<u8>, String> {
 
     eprintln!("[3/5] Extracting global.mo from dspkg...");
 
-    let reader = std::io::Cursor::new(&buf);
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| format!("open zip: {e}"))?;
+    let mo = extract_mo_from_dspkg(&buf)?;
 
-    let mut best: Option<(u64, String)> = None;
+    eprintln!("  extracted {} bytes", mo.len());
+    Ok(mo)
+}
+
+fn extract_mo_from_dspkg(data: &[u8]) -> Result<Vec<u8>, String> {
+    let reader = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| format!("open zip (LZMA2): {e}"))?;
+
+    let mut best: Option<Vec<u8>> = None;
+    let mut best_version: u64 = 0;
+
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
         let name = entry.name().to_string();
-        if name.ends_with("texts/zh_sg/LC_MESSAGES/global.mo") {
-            let num = name.split('/')
-                .find_map(|p| p.parse::<u64>().ok())
-                .unwrap_or(0);
-            match &best {
-                Some((n, _)) if num > *n => best = Some((num, name)),
-                None => best = Some((num, name)),
-                _ => {}
-            }
+
+        if !name.ends_with("texts/zh_sg/LC_MESSAGES/global.mo") {
+            continue;
+        }
+
+        let num = name
+            .split('/')
+            .find_map(|p| p.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let mut entry = archive
+            .by_name(&name)
+            .map_err(|e| format!("extract {name}: {e}"))?;
+        let mut mo_data = Vec::new();
+        entry
+            .read_to_end(&mut mo_data)
+            .map_err(|e| format!("read {name}: {e}"))?;
+
+        if num > 0 && num > best_version {
+            best_version = num;
+            best = Some(mo_data);
+        } else if best.is_none() {
+            best = Some(mo_data);
         }
     }
 
-    let entry_name = best.ok_or("global.mo not found in dspkg")?.1;
-    eprintln!("  extracting: {entry_name}");
-
-    let mut entry = archive.by_name(&entry_name)
-        .map_err(|e| format!("extract {entry_name}: {e}"))?;
-    let mut mo_data = Vec::new();
-    entry.read_to_end(&mut mo_data)
-        .map_err(|e| format!("read mo: {e}"))?;
-
-    Ok(mo_data)
+    best.ok_or("global.mo not found in dspkg".into())
 }
 
 // ---------------------------------------------------------------------------

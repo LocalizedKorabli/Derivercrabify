@@ -278,8 +278,7 @@ fn extract_mo_from_zip(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| format!("open zip: {e}"))?;
 
-    let mut best: Option<Vec<u8>> = None;
-    let mut best_version: u64 = 0;
+    let mut candidates: Vec<(u64, String)> = Vec::new();
 
     for i in 0..archive.len() {
         let entry = archive
@@ -296,23 +295,25 @@ fn extract_mo_from_zip(data: &[u8]) -> Result<Vec<u8>, String> {
             .find_map(|p| p.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let mut entry = archive
-            .by_name(&name)
-            .map_err(|e| format!("extract {name}: {e}"))?;
-        let mut mo_data = Vec::new();
-        entry
-            .read_to_end(&mut mo_data)
-            .map_err(|e| format!("read {name}: {e}"))?;
-
-        if num > 0 && num > best_version {
-            best_version = num;
-            best = Some(mo_data);
-        } else if best.is_none() {
-            best = Some(mo_data);
-        }
+        candidates.push((num, name));
     }
 
-    best.ok_or("global.mo not found in zip".into())
+    if candidates.is_empty() {
+        return Err("global.mo not found in zip".into());
+    }
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let (_, name) = &candidates[0];
+    let mut entry = archive
+        .by_name(name)
+        .map_err(|e| format!("extract {name}: {e}"))?;
+    let mut mo_data = Vec::new();
+    entry
+        .read_to_end(&mut mo_data)
+        .map_err(|e| format!("read {name}: {e}"))?;
+
+    Ok(mo_data)
 }
 
 fn extract_mo_from_raw(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -432,7 +433,7 @@ async fn upload_to_r2(data: &[u8]) -> Result<(), String> {
         .map_err(|_| "R2_ENDPOINT_URL not set".to_string())?;
     let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "auto".into());
 
-    let config = aws_config::from_env()
+    let config = aws_config::defaults()
         .endpoint_url(&endpoint)
         .region(aws_config::Region::new(region))
         .load()

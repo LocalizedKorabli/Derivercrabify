@@ -2,7 +2,7 @@ name: Update Locale Pack
 
 on:
   schedule:
-    - cron: '0 16 * * *'
+    - cron: '30 19 * * *'
   workflow_dispatch:
 
 jobs:

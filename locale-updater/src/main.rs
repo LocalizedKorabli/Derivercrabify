@@ -261,8 +261,9 @@ fn download_and_extract_mo(dspkg_url: &str) -> Result<Vec<u8>, String> {
     eprintln!("[3/5] Extracting global.mo from dspkg (LZMA2 decompress)...");
 
     let mut decompressed = Vec::new();
-    lzma_rs::xz_decompress(&mut &buf[..], &mut decompressed)
-        .map_err(|e| format!("LZMA2 decompress: {e}"))?;
+    xz2::read::XzDecoder::new(&buf[..])
+        .read_to_end(&mut decompressed)
+        .map_err(|e| format!("decompress dspkg: {e}"))?;
 
     let mo = extract_mo_from_raw(&decompressed)?;
 

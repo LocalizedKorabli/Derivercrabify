@@ -433,7 +433,7 @@ async fn upload_to_r2(data: &[u8]) -> Result<(), String> {
         .map_err(|_| "R2_ENDPOINT_URL not set".to_string())?;
     let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "auto".into());
 
-    let config = aws_config::defaults()
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .endpoint_url(&endpoint)
         .region(aws_config::Region::new(region))
         .load()

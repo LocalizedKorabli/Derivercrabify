@@ -4,7 +4,7 @@ use polib::message::Message;
 use polib::metadata::CatalogMetadata;
 use polib::mo_file;
 use quick_xml::de::from_str;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -234,8 +234,8 @@ fn build_direct_url(torrent_url: &str, file_name: &str) -> Result<String, String
 // Download & extract
 // ---------------------------------------------------------------------------
 
-fn download_and_extract_mo(dspkg_url: &str) -> Result<Vec<u8>, String> {
-    eprintln!("[2/5] Downloading dspkg...");
+fn download_and_extract_mo(dspkg_url: &str) -> Result<(Vec<u8>, String), String> {
+    eprintln!("[2/6] Downloading dspkg...");
 
     let mut resp = reqwest::blocking::get(dspkg_url)
         .map_err(|e| format!("download dspkg: {e}"))?;
@@ -258,12 +258,19 @@ fn download_and_extract_mo(dspkg_url: &str) -> Result<Vec<u8>, String> {
     }
     eprintln!("  downloaded {} bytes", downloaded);
 
-    eprintln!("[3/5] Extracting global.mo from dspkg (7z)...");
+    let dspkg_sha256 = hex::encode({
+        let mut h = Sha256::new();
+        h.update(&buf);
+        h.finalize()
+    });
+    eprintln!("  dspkg sha256: {dspkg_sha256}");
+
+    eprintln!("[3/6] Extracting global.mo from dspkg (7z)...");
 
     let mo = extract_mo_from_7z(&buf)?;
 
     eprintln!("  extracted {} bytes", mo.len());
-    Ok(mo)
+    Ok((mo, dspkg_sha256))
 }
 
 fn extract_mo_from_7z(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -311,8 +318,6 @@ fn extract_mo_from_7z(data: &[u8]) -> Result<Vec<u8>, String> {
 // ---------------------------------------------------------------------------
 
 fn process_mo(data: &[u8]) -> Result<Vec<u8>, String> {
-    eprintln!("[4/5] Processing MO file...");
-
     let mo = MoFile::parse(data)?;
     let filtered = mo.filter_eventum();
     let output = filtered.to_bytes()?;
@@ -329,14 +334,17 @@ fn process_mo(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Upload to R2
+// R2 client helpers & state management
 // ---------------------------------------------------------------------------
 
-async fn upload_to_r2(data: &[u8]) -> Result<(), String> {
-    eprintln!("[5/5] Uploading to R2...");
+#[derive(Debug, Serialize, Deserialize)]
+struct RunState {
+    dspkg_url: String,
+    dspkg_sha256: String,
+    mo_sha256: String,
+}
 
-    let bucket = std::env::var("R2_BUCKET_NAME")
-        .map_err(|_| "R2_BUCKET_NAME not set".to_string())?;
+async fn build_s3_client() -> Result<aws_sdk_s3::Client, String> {
     let endpoint = std::env::var("R2_ENDPOINT_URL")
         .map_err(|_| "R2_ENDPOINT_URL not set".to_string())?;
     let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "auto".into());
@@ -347,7 +355,51 @@ async fn upload_to_r2(data: &[u8]) -> Result<(), String> {
         .load()
         .await;
 
-    let client = aws_sdk_s3::Client::new(&config);
+    Ok(aws_sdk_s3::Client::new(&config))
+}
+
+fn bucket_name() -> Result<String, String> {
+    std::env::var("R2_BUCKET_NAME")
+        .map_err(|_| "R2_BUCKET_NAME not set".to_string())
+}
+
+async fn load_previous_state(client: &aws_sdk_s3::Client) -> Option<RunState> {
+    let bucket = bucket_name().ok()?;
+    let resp = client
+        .get_object()
+        .bucket(&bucket)
+        .key("i18n/zh_cn360/state.json")
+        .send()
+        .await
+        .ok()?;
+
+    let body = resp.body.collect().await.ok()?;
+    let state: RunState = serde_json::from_slice(&body.into_bytes()).ok()?;
+    Some(state)
+}
+
+async fn save_state(client: &aws_sdk_s3::Client, state: &RunState) -> Result<(), String> {
+    let bucket = bucket_name()?;
+    let json = serde_json::to_string(state)
+        .map_err(|e| format!("serialize state: {e}"))?;
+
+    client
+        .put_object()
+        .bucket(&bucket)
+        .key("i18n/zh_cn360/state.json")
+        .body(ByteStream::from(json.as_bytes().to_vec()))
+        .content_type("application/json")
+        .cache_control("no-cache")
+        .send()
+        .await
+        .map_err(|e| format!("save state to R2: {e}"))?;
+
+    eprintln!("  state saved to {bucket}/i18n/zh_cn360/state.json");
+    Ok(())
+}
+
+async fn upload_mo(client: &aws_sdk_s3::Client, data: &[u8]) -> Result<(), String> {
+    let bucket = bucket_name()?;
     let key = "i18n/zh_cn360/global.mo";
 
     client
@@ -359,7 +411,7 @@ async fn upload_to_r2(data: &[u8]) -> Result<(), String> {
         .cache_control("public, max-age=3600")
         .send()
         .await
-        .map_err(|e| format!("upload to R2 failed: {e}"))?;
+        .map_err(|e| format!("upload to R2: {e}"))?;
 
     eprintln!("  uploaded to {bucket}/{key}");
     Ok(())
@@ -378,10 +430,41 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    let client = build_s3_client().await?;
+
     let dspkg_url = fetch_locale_dspkg_url()?;
-    let mo_data = download_and_extract_mo(&dspkg_url)?;
+
+    if let Some(prev) = load_previous_state(&client).await {
+        if prev.dspkg_url == dspkg_url {
+            eprintln!("  dspkg URL unchanged, no update needed (saved dspkg SHA: {})", &prev.dspkg_sha256[..12]);
+            eprintln!("Done!");
+            return Ok(());
+        }
+        eprintln!("  dspkg URL changed (previous version detected, proceeding...)");
+    }
+
+    let (mo_data, dspkg_sha256) = download_and_extract_mo(&dspkg_url)?;
+
+    eprintln!("[5/6] Processing MO file...");
+
     let processed = process_mo(&mo_data)?;
-    upload_to_r2(&processed).await?;
+
+    let mo_sha256 = hex::encode({
+        let mut h = Sha256::new();
+        h.update(&processed);
+        h.finalize()
+    });
+
+    eprintln!("[6/6] Uploading to R2...");
+
+    upload_mo(&client, &processed).await?;
+
+    let state = RunState {
+        dspkg_url,
+        dspkg_sha256,
+        mo_sha256,
+    };
+    save_state(&client, &state).await?;
 
     eprintln!("Done!");
     Ok(())

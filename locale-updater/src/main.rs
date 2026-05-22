@@ -258,144 +258,52 @@ fn download_and_extract_mo(dspkg_url: &str) -> Result<Vec<u8>, String> {
     }
     eprintln!("  downloaded {} bytes", downloaded);
 
-    eprintln!("[3/5] Extracting global.mo from dspkg...");
+    eprintln!("[3/5] Extracting global.mo from dspkg (7z)...");
 
-    let mo = match extract_mo_from_zip(&buf) {
-        Ok(m) => m,
-        Err(zip_err) => {
-            eprintln!("  ZIP extraction failed: {zip_err}");
-            eprintln!("  falling back to brute-force search...");
-            extract_mo_from_raw(&buf)?
-        }
-    };
+    let mo = extract_mo_from_7z(&buf)?;
 
     eprintln!("  extracted {} bytes", mo.len());
     Ok(mo)
 }
 
-fn extract_mo_from_zip(data: &[u8]) -> Result<Vec<u8>, String> {
-    let reader = std::io::Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| format!("open zip: {e}"))?;
+fn extract_mo_from_7z(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Seek;
 
-    let mut candidates: Vec<(u64, String)> = Vec::new();
+    let cursor = std::io::Cursor::new(data);
+    let mut archive = unarc_rs::sevenz::sevenz_archive::SevenZArchive::new(cursor)
+        .map_err(|e| format!("open 7z: {e}"))?;
 
-    for i in 0..archive.len() {
-        let entry = archive
-            .by_index(i)
-            .map_err(|e| format!("zip entry {i}: {e}"))?;
-        let name = entry.name().to_string();
+    let mut best: Option<(u64, Vec<u8>)> = None;
 
-        if !name.ends_with("texts/zh_sg/LC_MESSAGES/global.mo") {
+    loop {
+        let header = match archive.get_next_entry() {
+            Ok(Some(h)) => h,
+            Ok(None) => break,
+            Err(e) => return Err(format!("7z entry error: {e}")),
+        };
+
+        if !header.name.ends_with("texts/zh_sg/LC_MESSAGES/global.mo") {
+            archive.skip(&header).ok();
             continue;
         }
 
-        let num = name
+        let data = archive.read(&header)
+            .map_err(|e| format!("read {}: {e}", header.name))?;
+
+        let num = header.name
             .split('/')
             .find_map(|p| p.parse::<u64>().ok())
             .unwrap_or(0);
 
-        candidates.push((num, name));
+        if num > 0 && (best.as_ref().map_or(true, |(n, _)| num > *n)) {
+            best = Some((num, data));
+        } else if best.is_none() {
+            best = Some((num, data));
+        }
     }
 
-    if candidates.is_empty() {
-        return Err("global.mo not found in zip".into());
-    }
-
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let (_, name) = &candidates[0];
-    let mut entry = archive
-        .by_name(name)
-        .map_err(|e| format!("extract {name}: {e}"))?;
-    let mut mo_data = Vec::new();
-    entry
-        .read_to_end(&mut mo_data)
-        .map_err(|e| format!("read {name}: {e}"))?;
-
-    Ok(mo_data)
-}
-
-fn extract_mo_from_raw(data: &[u8]) -> Result<Vec<u8>, String> {
-    let magic_bytes: [u8; 4] = MO_MAGIC.to_le_bytes();
-
-    let mut best: Option<Vec<u8>> = None;
-    let mut best_version: u64 = 0;
-    let mut pos = 0;
-
-    while let Some(idx) = data[pos..]
-        .windows(4)
-        .position(|w| w == magic_bytes)
-    {
-        let offset = pos + idx;
-        if offset + 28 > data.len() {
-            break;
-        }
-
-        let num_strings = read_u32_le(data, offset + 8) as usize;
-        let orig_off = read_u32_le(data, offset + 12) as usize;
-        let trans_off = read_u32_le(data, offset + 16) as usize;
-
-        if num_strings == 0 || num_strings > 100_000 {
-            pos = offset + 1;
-            continue;
-        }
-
-        let mut total_size = orig_off.max(trans_off) + num_strings * 8;
-
-        for i in 0..num_strings {
-            let ooff = offset
-                + read_u32_le(data, offset + orig_off + i * 8 + 4) as usize;
-            let olen = read_u32_le(data, offset + orig_off + i * 8) as usize;
-            let toff = offset
-                + read_u32_le(data, offset + trans_off + i * 8 + 4) as usize;
-            let tlen = read_u32_le(data, offset + trans_off + i * 8) as usize;
-            total_size = total_size.max(ooff + olen + 1).max(toff + tlen + 1);
-        }
-
-        if offset + total_size > data.len() {
-            pos = offset + 1;
-            continue;
-        }
-
-        let chunk = &data[offset..offset + total_size];
-
-        if let Ok(mf) = MoFile::parse(chunk) {
-            let has_zh_sg = mf.entries.iter().any(|(_, v)| {
-                let s = String::from_utf8_lossy(v);
-                s.contains("Language: zh_SG") || s.contains("zh_SG")
-            });
-
-            if has_zh_sg {
-                let version = mf
-                    .entries
-                    .iter()
-                    .filter_map(|(_, v)| {
-                        let s = String::from_utf8_lossy(v);
-                        s.lines()
-                            .find(|l| l.starts_with("Project-Id-Version:"))
-                            .and_then(|l| {
-                                l.rsplit(':')
-                                    .next()
-                                    .and_then(|v| v.trim().parse::<u64>().ok())
-                            })
-                    })
-                    .next()
-                    .unwrap_or(0);
-
-                if version > 0 && version > best_version {
-                    best_version = version;
-                    best = Some(chunk.to_vec());
-                } else if best.is_none() {
-                    best = Some(chunk.to_vec());
-                }
-            }
-        }
-
-        pos = offset + 1;
-    }
-
-    best.ok_or("global.mo not found in dspkg".into())
+    best.map(|(_, d)| d)
+        .ok_or("global.mo not found in 7z archive".into())
 }
 
 // ---------------------------------------------------------------------------

@@ -14,9 +14,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y liblzma-dev
-
       - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:

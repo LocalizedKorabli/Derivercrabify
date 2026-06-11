@@ -5,3 +5,26 @@ build/
 *.tauri
 src-tauri/target/
 locale-updater/target/
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Rust
+**/*.rs.bk
+
+# Tauri desktop runtime data
+src-tauri/gen/schemas/

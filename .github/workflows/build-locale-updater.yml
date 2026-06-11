@@ -1,0 +1,35 @@
+name: Build locale-updater
+
+on:
+  push:
+    paths:
+      - 'locale-updater/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: locale-updater
+
+      - name: Build release binary
+        run: cargo build --release -p locale-updater
+
+      - name: Upload binary to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create locale-updater target/release/locale-updater \
+            --title "locale-updater" \
+            --notes "Pre-built binary for locale-updater (automated build)" \
+            --target "${{ github.sha }}" \
+            --latest \
+          || gh release upload locale-updater target/release/locale-updater --clobber

@@ -11,13 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: locale-updater
+      - name: Download pre-built locale-updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download locale-updater --pattern 'locale-updater' --output /usr/local/bin/locale-updater
+          chmod +x /usr/local/bin/locale-updater
 
       - name: Run locale-updater
         env:
@@ -26,4 +25,4 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: auto
-        run: cargo run --release -p locale-updater
+        run: locale-updater

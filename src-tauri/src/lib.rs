@@ -3,22 +3,15 @@ mod mo;
 
 use instances::{InstanceInfo, InstallationInfo};
 use serde::{Deserialize, Serialize};
-use std::io::Read;
-use std::path::PathBuf;
 use tauri::Emitter;
-
-const LOCALE_URL: &str = "https://dl.localizedkorabli.org/i18n/zh_cn360/global.mo";
+use futures_util::StreamExt;
+use std::io::Write;
 
 #[derive(Clone, Serialize)]
 struct ProgressPayload {
     message: String,
     downloaded: u64,
     total: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CacheInfo {
-    etag: String,
 }
 
 fn emit_progress(app: &tauri::AppHandle, message: &str, downloaded: u64, total: u64) {
@@ -29,148 +22,130 @@ fn emit_progress(app: &tauri::AppHandle, message: &str, downloaded: u64, total: 
     });
 }
 
-fn cache_dir() -> Result<PathBuf, String> {
-    let dir = dirs::data_dir()
-        .ok_or_else(|| "找不到用户数据目录".to_string())?
-        .join("wowscn_derivercrabify");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("创建缓存目录失败: {}", e))?;
-    Ok(dir)
+const PATCHES_CHAIN_URL: &str = "https://wgus-eu.wargaming.net/api/v1/patches_chain/?game_id=WOWS.WW.PRODUCTION&protocol_version=1.11&metadata_version=20251121135024&metadata_protocol_version=7.10&client_type=high&lang=ZH_SG&chain_id=f21&game_installation=false&gc_publisher=wargaming&client_current_version=0&hotfix_current_version=0&locale_current_version=0&sdcontent_current_version=0";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "protocol")]
+struct PatchesChainRoot {
+    #[serde(rename = "patches_chain", default)]
+    patches_chain: PatchesChain,
 }
 
-fn load_cache_etag() -> Option<String> {
-    let cache_file = cache_dir().ok()?.join("cache_info.json");
-    let content = std::fs::read_to_string(&cache_file).ok()?;
-    let info: CacheInfo = serde_json::from_str(&content).ok()?;
-    Some(info.etag)
+#[derive(Debug, Deserialize, Default)]
+struct PatchesChain {
+    #[serde(rename = "patch", default)]
+    patch: Vec<Patch>,
 }
 
-fn save_cache(etag: &str, data: &[u8]) -> Result<(), String> {
-    let dir = cache_dir()?;
+#[derive(Debug, Deserialize)]
+struct Patch {
+    #[serde(rename = "files", default)]
+    files: Vec<FilesElement>,
+    #[serde(rename = "torrent", default)]
+    torrent: Vec<Torrent>,
+}
 
-    let info = CacheInfo {
-        etag: etag.to_string(),
-    };
-    let json = serde_json::to_string(&info)
-        .map_err(|e| format!("序列化缓存信息失败: {}", e))?;
-    std::fs::write(dir.join("cache_info.json"), json)
-        .map_err(|e| format!("写入缓存信息失败: {}", e))?;
+#[derive(Debug, Deserialize)]
+struct FilesElement {
+    #[serde(rename = "file", default)]
+    file: Vec<LocaleFileEntry>,
+}
 
-    std::fs::write(dir.join("global.mo"), data)
-        .map_err(|e| format!("写入缓存文件失败: {}", e))?;
+#[derive(Debug, Deserialize)]
+struct LocaleFileEntry {
+    #[serde(rename = "name")]
+    name: Option<String>,
+}
 
-    Ok(())
+#[derive(Debug, Deserialize)]
+struct Torrent {
+    #[serde(rename = "urls")]
+    urls: Urls,
+}
+
+#[derive(Debug, Deserialize)]
+struct Urls {
+    #[serde(rename = "url", default)]
+    url: Vec<String>,
+}
+
+fn fetch_locale_dspkg_url() -> Result<String, String> {
+    let xml = reqwest::blocking::get(PATCHES_CHAIN_URL)
+        .map_err(|e| format!("请求更新信息失败: {e}"))?
+        .text()
+        .map_err(|e| format!("读取响应失败: {e}"))?;
+
+    let root: PatchesChainRoot =
+        quick_xml::de::from_str(&xml).map_err(|e| format!("解析 XML 失败: {e}"))?;
+
+    for patch in &root.patches_chain.patch {
+        let file_name = patch.files
+            .iter()
+            .flat_map(|fe| &fe.file)
+            .find_map(|f| f.name.as_ref().filter(|n| n.contains("locale")))
+            .cloned();
+
+        let file_name = match file_name {
+            Some(n) => n,
+            None => continue,
+        };
+
+        for torrent in &patch.torrent {
+            for url in &torrent.urls.url {
+                let url = url.trim();
+                if url.is_empty() {
+                    continue;
+                }
+                return build_direct_url(url, &file_name);
+            }
+        }
+    }
+
+    Err("未找到语言包更新".into())
+}
+
+fn build_direct_url(torrent_url: &str, file_name: &str) -> Result<String, String> {
+    if let Some(pos) = torrent_url.find("patches/") {
+        let base = &torrent_url[..pos + "patches/".len()];
+        return Ok(format!("{base}{file_name}"));
+    }
+    Err("无法从 torrent URL 提取基础路径".into())
+}
+
+fn extract_mo_from_dspkg(url: &str) -> Result<Vec<u8>, String> {
+    let mut rf = gc_download::remote_file::RemoteFile::new(url)
+        .map_err(|e| format!("打开远程 dspkg 失败: {e}"))?;
+
+    let entries = gc_download::sevenz::parse_archive_index(&mut rf)
+        .map_err(|e| format!("解析 7z 索引失败: {e}"))?;
+
+    let best = entries
+        .iter()
+        .filter(|e| e.filename.ends_with("texts/zh_sg/LC_MESSAGES/global.mo"))
+        .max_by_key(|e| {
+            e.filename
+                .split('/')
+                .find_map(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+        })
+        .ok_or_else(|| "未在 dspkg 中找到 global.mo".to_string())?;
+
+    gc_download::sevenz::extract_entry(&mut rf, &best.filename)
+        .map_err(|e| format!("提取 global.mo 失败: {e}"))
 }
 
 fn download_mo(app: &tauri::AppHandle) -> Result<Vec<u8>, String> {
-    if let Some(etag) = load_cache_etag() {
-        let cache_path = cache_dir()?.join("global.mo");
-        if cache_path.is_file() {
-            emit_progress(app, "正在连接服务器...", 0, 0);
+    emit_progress(app, "正在获取更新信息...", 0, 0);
 
-            let client = reqwest::blocking::Client::new();
-            let resp = client
-                .get(LOCALE_URL)
-                .header("If-None-Match", &etag)
-                .send()
-                .map_err(|e| format!("下载语言包失败: {}", e))?;
+    let dspkg_url = fetch_locale_dspkg_url()?;
 
-            if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
-                emit_progress(app, "语言包未变化，使用缓存", 0, 0);
-                return std::fs::read(&cache_path)
-                    .map_err(|e| format!("读取缓存文件失败: {}", e));
-            }
+    emit_progress(app, "正在下载语言文件...", 0, 0);
 
-            let new_total = resp.content_length().unwrap_or(0);
-            let new_etag = resp
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+    let mo_data = extract_mo_from_dspkg(&dspkg_url)?;
 
-            emit_progress(app, "正在下载语言包...", 0, new_total);
+    emit_progress(app, "语言文件下载完成", 0, 0);
 
-            let mut response = resp;
-            let mut buf = Vec::new();
-            if new_total > 0 {
-                buf.reserve(new_total as usize);
-            }
-            let mut downloaded: u64 = 0;
-            let mut last_emit: u64 = 0;
-
-            loop {
-                let mut chunk = vec![0u8; 65536];
-                let n = response
-                    .read(&mut chunk)
-                    .map_err(|e| format!("读取下载数据失败: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                downloaded += n as u64;
-
-                let threshold = if new_total > 0 { new_total.max(1) / 50 } else { 256 * 1024 };
-                if downloaded - last_emit >= threshold || downloaded == new_total {
-                    last_emit = downloaded;
-                    emit_progress(app, "正在下载语言包...", downloaded, new_total);
-                }
-            }
-
-            if let Some(etag_val) = new_etag {
-                save_cache(&etag_val, &buf)?;
-            }
-
-            return Ok(buf);
-        }
-    }
-
-    emit_progress(app, "正在连接服务器...", 0, 0);
-
-    let client = reqwest::blocking::Client::new();
-    let mut response = client
-        .get(LOCALE_URL)
-        .send()
-        .map_err(|e| format!("下载语言包失败: {}", e))?;
-
-    let total = response.content_length().unwrap_or(0);
-    let new_etag = response
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    emit_progress(app, "正在下载语言包...", 0, total);
-
-    let mut buf = Vec::new();
-    if total > 0 {
-        buf.reserve(total as usize);
-    }
-    let mut downloaded: u64 = 0;
-    let mut last_emit: u64 = 0;
-
-    loop {
-        let mut chunk = vec![0u8; 65536];
-        let n = response
-            .read(&mut chunk)
-            .map_err(|e| format!("读取下载数据失败: {}", e))?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        downloaded += n as u64;
-
-        let threshold = if total > 0 { total.max(1) / 50 } else { 256 * 1024 };
-        if downloaded - last_emit >= threshold || downloaded == total {
-            last_emit = downloaded;
-            emit_progress(app, "正在下载语言包...", downloaded, total);
-        }
-    }
-
-    if let Some(etag_val) = new_etag {
-        save_cache(&etag_val, &buf)?;
-    }
-
-    Ok(buf)
+    Ok(mo_data)
 }
 
 #[tauri::command]
@@ -319,6 +294,79 @@ fn install_locale_pack(
     Ok(installations)
 }
 
+const METADATA_URL: &str = "https://localizedkorabli.org/metadata/derivercrabify/metadata.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateInfo {
+    version: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UpdateProgress {
+    percent: u64,
+}
+
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
+async fn check_update() -> Result<Option<UpdateInfo>, String> {
+    let resp = reqwest::get(METADATA_URL)
+        .await
+        .map_err(|e| format!("获取更新信息失败: {e}"))?;
+    let info: UpdateInfo = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析更新信息失败: {e}"))?;
+
+    let current = if cfg!(debug_assertions) { "0.0.0" } else { env!("CARGO_PKG_VERSION") };
+    if info.version == current {
+        Ok(None)
+    } else {
+        Ok(Some(info))
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle, download_url: String) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载更新失败: {e}"))?;
+
+    let total = resp.content_length().unwrap_or(0);
+    let tmp_path = std::env::temp_dir().join("derivercrabify_update.exe");
+    let mut file = std::fs::File::create(&tmp_path)
+        .map_err(|e| format!("创建临时文件失败: {e}"))?;
+
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("下载数据失败: {e}"))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("写入文件失败: {e}"))?;
+        downloaded += chunk.len() as u64;
+        if total > 0 {
+            let percent = (downloaded as f64 / total as f64 * 100.0) as u64;
+            let _ = app.emit("update-progress", UpdateProgress { percent });
+        }
+    }
+
+    drop(file);
+
+    std::process::Command::new(&tmp_path)
+        .spawn()
+        .map_err(|e| format!("启动安装程序失败: {e}"))?;
+
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -328,6 +376,9 @@ pub fn run() {
             add_instance,
             refresh_instance,
             install_locale_pack,
+            get_app_version,
+            check_update,
+            install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

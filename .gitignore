@@ -3,8 +3,7 @@ build/
 .svelte-kit/
 .env*
 *.tauri
-src-tauri/target/
-locale-updater/target/
+target/
 
 # Logs
 *.log
@@ -26,5 +25,11 @@ desktop.ini
 # Rust
 **/*.rs.bk
 
+# Lock files
+*.lock
+
 # Tauri desktop runtime data
 src-tauri/gen/schemas/
+
+# Tauri updater private key
+.tauri/updater.key

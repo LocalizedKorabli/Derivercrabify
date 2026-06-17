@@ -4,6 +4,9 @@
   "description": "",
   "type": "module",
   "scripts": {
+    "sync-version": "node scripts/sync-version.js",
+    "prebuild": "npm run sync-version",
+    "predev": "npm run sync-version",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",

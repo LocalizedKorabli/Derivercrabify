@@ -35,6 +35,11 @@
   let progressPercent = $derived(
     progressTotal > 0 ? Math.round((progressDownloaded / progressTotal) * 100) : 0
   );
+  let appVersion = $state("");
+  let updateVersion = $state("");
+  let updateDownloading = $state(false);
+  let updatePercent = $state(0);
+  let checkingUpdate = $state(false);
 
   async function scan() {
     scanning = true;
@@ -122,7 +127,61 @@
 
   onMount(() => {
     scan();
+    getVersion();
+    checkUpdateSilent();
+
+    const cancel = listen<{ percent: number }>("update-progress", (event) => {
+      updatePercent = event.payload.percent;
+    });
+    cancel.then((fn) => unlisteners.push(fn));
   });
+
+  let unlisteners: (() => void)[] = [];
+
+  async function getVersion() {
+    try {
+      appVersion = await invoke<string>("get_app_version");
+    } catch {}
+  }
+
+  async function checkUpdateSilent() {
+    try {
+      const info = await invoke<{ version: string; path: string } | null>("check_update");
+      if (info) updateVersion = info.version;
+    } catch {}
+  }
+
+  async function checkUpdate() {
+    checkingUpdate = true;
+    try {
+      const info = await invoke<{ version: string; path: string } | null>("check_update");
+      if (info) {
+        updateVersion = info.version;
+      } else {
+        updateVersion = "";
+        statusMsg = "已是最新版";
+        setTimeout(() => { statusMsg = ""; }, 3000);
+      }
+    } catch (e: any) {
+      statusMsg = "检查更新失败: " + String(e);
+      setTimeout(() => { statusMsg = ""; }, 5000);
+    } finally {
+      checkingUpdate = false;
+    }
+  }
+
+  async function handleUpdate() {
+    updateDownloading = true;
+    updatePercent = 0;
+    try {
+      const info = await invoke<{ version: string; path: string }>("check_update");
+      if (info) {
+        await invoke("install_update", { downloadUrl: info.path });
+      }
+    } catch {
+      updateDownloading = false;
+    }
+  }
 </script>
 
 <main class="container mx-auto max-w-2xl p-6">
@@ -131,12 +190,31 @@
     CN360战舰世界反和谐工具
   </p>
 
+  {#if updateVersion}
+    <div role="alert" class="alert alert-info mb-4">
+      <span>发现新版本 v{updateVersion}</span>
+      <div class="flex gap-2">
+        {#if updateDownloading}
+          <div class="flex items-center gap-2">
+            <progress class="progress progress-info w-24" value={updatePercent} max="100"></progress>
+            <span class="text-sm">{updatePercent}%</span>
+          </div>
+        {:else}
+          <button class="btn btn-sm btn-primary" onclick={handleUpdate}>更新</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <div class="flex justify-center gap-3 mb-6">
     <button class="btn btn-outline btn-sm" onclick={scan} disabled={scanning}>
       {scanning ? "扫描中..." : "重新扫描"}
     </button>
     <button class="btn btn-primary btn-sm" onclick={() => (showAddModal = true)}>
       手动添加实例
+    </button>
+    <button class="btn btn-ghost btn-sm" onclick={checkUpdate} disabled={checkingUpdate}>
+      {checkingUpdate ? "检查中..." : updateVersion ? "有新版本" : "检查更新"}
     </button>
   </div>
 
@@ -299,6 +377,10 @@
       {/each}
     </div>
   {/if}
+
+  <p class="text-center text-xs text-base-content/30 mt-8">
+    v{appVersion}
+  </p>
 </main>
 
 {#if showAddModal}

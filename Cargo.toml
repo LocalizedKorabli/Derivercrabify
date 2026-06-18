@@ -1,3 +1,3 @@
 [workspace]
-members = ["src-tauri", "locale-updater"]
+members = ["src-tauri"]
 resolver = "2"

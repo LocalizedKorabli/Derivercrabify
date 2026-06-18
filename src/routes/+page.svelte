@@ -3,10 +3,14 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import type { UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+
+  const win = getCurrentWindow();
 
   interface InstallationInfo {
     version_folder: string;
-    installed: boolean;
+    text_installed: boolean;
+    chat_installed: boolean;
   }
 
   interface InstanceInfo {
@@ -35,6 +39,13 @@
   let progressPercent = $derived(
     progressTotal > 0 ? Math.round((progressDownloaded / progressTotal) * 100) : 0
   );
+  let appVersion = $state("");
+  let updateVersion = $state("");
+  let updateDownloading = $state(false);
+  let updatePercent = $state(0);
+  let checkingUpdate = $state(false);
+  let textAnticensor = $state(true);
+  let chatAnticensor = $state(true);
 
   async function scan() {
     scanning = true;
@@ -42,7 +53,7 @@
     try {
       instances = await invoke("scan_instances");
       if (instances.length === 0) {
-        error = "未找到CN360战舰世界客户端实例。请确保已安装360战舰世界。";
+        error = "未找到战舰世界国服客户端实例。请确保已安装战舰世界国服。";
       }
     } catch (e: any) {
       error = "扫描失败：" + String(e);
@@ -89,6 +100,8 @@
 
       const results: InstallationInfo[] = await invoke("install_locale_pack", {
         instancePath,
+        textAnticensor,
+        chatAnticensor,
       });
 
       instances = instances.map((inst) => {
@@ -122,179 +135,194 @@
 
   onMount(() => {
     scan();
+    getVersion();
+    checkUpdateSilent();
+
+    const cancel = listen<{ percent: number }>("update-progress", (event) => {
+      updatePercent = event.payload.percent;
+    });
+    cancel.then((fn) => unlisteners.push(fn));
   });
+
+  let unlisteners: (() => void)[] = [];
+
+  async function getVersion() {
+    try {
+      appVersion = await invoke<string>("get_app_version");
+    } catch {}
+  }
+
+  async function checkUpdateSilent() {
+    try {
+      const info = await invoke<{ version: string; path: string } | null>("check_update");
+      if (info) updateVersion = info.version;
+    } catch {}
+  }
+
+  async function checkUpdate() {
+    checkingUpdate = true;
+    try {
+      const info = await invoke<{ version: string; path: string } | null>("check_update");
+      if (info) {
+        updateVersion = info.version;
+      } else {
+        updateVersion = "";
+        statusMsg = "已是最新版";
+        setTimeout(() => { statusMsg = ""; }, 3000);
+      }
+    } catch (e: any) {
+      statusMsg = "检查更新失败: " + String(e);
+      setTimeout(() => { statusMsg = ""; }, 5000);
+    } finally {
+      checkingUpdate = false;
+    }
+  }
+
+  async function handleUpdate() {
+    updateDownloading = true;
+    updatePercent = 0;
+    try {
+      const info = await invoke<{ version: string; path: string }>("check_update");
+      if (info) {
+        await invoke("install_update", { downloadUrl: info.path });
+      }
+    } catch {
+      updateDownloading = false;
+    }
+  }
 </script>
 
-<main class="container mx-auto max-w-2xl p-6">
-  <h1 class="text-3xl font-bold text-center mb-2">Derivercrabify</h1>
-  <p class="text-center text-base-content/60 mb-8">
-    CN360战舰世界反和谐工具
-  </p>
+<div data-tauri-drag-region class="h-9 flex items-center justify-between px-4">
+  <span class="text-xs text-base-content/40 pointer-events-none">Derivercrabify</span>
+  <div class="flex items-center gap-0 -mr-2">
+    <button class="h-9 w-11 text-xs text-base-content/30 hover:text-base-content hover:bg-base-300 transition-colors" onclick={async () => await win.minimize()}>─</button>
+    <button class="h-9 w-11 text-xs text-base-content/30 hover:text-base-content hover:bg-base-300 transition-colors" onclick={async () => await win.toggleMaximize()}>□</button>
+    <button class="h-9 w-11 text-xs text-base-content/30 hover:text-white hover:bg-red-700 transition-colors" onclick={async () => await win.close()}>×</button>
+  </div>
+</div>
 
-  <div class="flex justify-center gap-3 mb-6">
-    <button class="btn btn-outline btn-sm" onclick={scan} disabled={scanning}>
-      {scanning ? "扫描中..." : "重新扫描"}
+<main class="mx-auto max-w-xl px-6 py-6">
+  {#if updateVersion}
+    <div class="mb-5 flex items-center justify-between border border-base-300 px-4 py-3">
+      <span class="text-sm">新版本 v{updateVersion} 可用</span>
+      {#if updateDownloading}
+        <div class="flex items-center gap-2">
+          <progress class="w-20 h-0.5 [&::-webkit-progress-bar]:bg-base-300 [&::-webkit-progress-value]:bg-base-content" value={updatePercent} max="100"></progress>
+          <span class="text-xs text-base-content/40">{updatePercent}%</span>
+        </div>
+      {:else}
+        <button class="text-xs text-base-content/50 hover:text-base-content transition-colors" onclick={handleUpdate}>更新</button>
+      {/if}
+    </div>
+  {/if}
+
+  <div class="mb-6 flex items-center gap-4 border-b border-base-300 pb-3">
+    <button class="text-xs text-base-content/50 hover:text-base-content transition-colors" onclick={scan} disabled={scanning}>
+      {scanning ? "扫描中…" : "重新扫描"}
     </button>
-    <button class="btn btn-primary btn-sm" onclick={() => (showAddModal = true)}>
-      手动添加实例
+    <span class="text-base-300">/</span>
+    <button class="text-xs text-base-content/50 hover:text-base-content transition-colors" onclick={() => (showAddModal = true)}>
+      手动添加
     </button>
+    <span class="text-base-300">/</span>
+    <button class="text-xs text-base-content/50 hover:text-base-content transition-colors" onclick={checkUpdate} disabled={checkingUpdate}>
+      {checkingUpdate ? "检查中…" : "检查更新"}
+    </button>
+    <span class="flex-1"></span>
+    <span class="text-xs text-base-content/30">{appVersion ? "v" + appVersion : ""}</span>
   </div>
 
   {#if scanning}
-    <div class="flex justify-center items-center gap-3 py-12">
-      <span class="loading loading-spinner loading-lg"></span>
-      <span class="text-base-content/60">正在扫描注册表...</span>
+    <div class="py-16 text-center text-xs text-base-content/40">
+      <span class="animate-pulse">扫描注册表中…</span>
     </div>
   {:else if error && instances.length === 0}
-    <div role="alert" class="alert alert-warning">
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        class="h-6 w-6 shrink-0 stroke-current"
-        fill="none"
-        viewBox="0 0 24 24"
-      >
-        <path
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-          d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
-        />
-      </svg>
-      <span>{error}</span>
-    </div>
+    <p class="text-xs text-base-content/40">{error}</p>
   {:else}
     {#if statusMsg}
-      <div role="alert" class="alert alert-success mb-4">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-6 w-6 shrink-0 stroke-current"
-          fill="none"
-          viewBox="0 0 24 24"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-          />
-        </svg>
-        <span>{statusMsg}</span>
-      </div>
+      <p class="mb-4 text-xs text-base-content/40">{statusMsg}</p>
     {/if}
 
     {#if error}
-      <div role="alert" class="alert alert-error mb-4">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-6 w-6 shrink-0 stroke-current"
-          fill="none"
-          viewBox="0 0 24 24"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
-          />
-        </svg>
-        <span>{error}</span>
-      </div>
+      <p class="mb-4 text-xs text-error">{error}</p>
     {/if}
 
     {#if loading && progressMsg}
-      <div class="card bg-base-200 shadow-sm mb-4">
-        <div class="card-body p-4">
-          <div class="flex items-center justify-between mb-2">
-            <span class="text-sm">{progressMsg}</span>
-            {#if progressTotal > 0}
-              <span class="text-sm text-base-content/60">{progressPercent}%</span>
-            {:else}
-              <span class="loading loading-spinner loading-xs"></span>
-            {/if}
-          </div>
+      <div class="mb-6 border border-base-300 px-4 py-3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-base-content/50">{progressMsg}</span>
           {#if progressTotal > 0}
-            <progress
-              class="progress progress-primary w-full"
-              value={progressDownloaded}
-              max={progressTotal}
-            ></progress>
+            <span class="text-xs text-base-content/40">{progressPercent}%</span>
           {:else}
-            <progress class="progress progress-primary w-full" value={null}></progress>
+            <span class="text-xs text-base-content/30 animate-pulse">处理中</span>
           {/if}
         </div>
+        {#if progressTotal > 0}
+          <progress class="w-full h-0.5 [&::-webkit-progress-bar]:bg-base-300 [&::-webkit-progress-value]:bg-base-content" value={progressDownloaded} max={progressTotal}></progress>
+        {:else}
+          <progress class="w-full h-0.5 [&::-webkit-progress-bar]:bg-base-300 [&::-webkit-progress-value]:bg-base-content" value={null}></progress>
+        {/if}
       </div>
     {/if}
 
     <div class="space-y-4">
       {#each instances as inst (inst.path)}
-        <div class="card bg-base-200 shadow-sm">
-          <div class="card-body p-5">
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0 flex-1">
-                <h3 class="card-title text-base truncate" title={inst.path}>
-                  {inst.path}
-                </h3>
+        <div>
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <p class="text-sm truncate text-base-content/50" title={inst.path}>{inst.path}</p>
 
-                {#if inst.version_folders.length === 0}
-                  <p class="text-sm text-base-content/50 mt-1">
-                    未找到有效的游戏版本文件夹
-                  </p>
-                {:else}
-                  <div class="mt-2 space-y-1.5">
+              {#if inst.version_folders.length === 0}
+                <p class="text-xs text-base-content/30 mt-1">未找到有效的游戏版本</p>
+              {:else}
+                <div class="mt-2 space-y-1">
                     {#each inst.installations as info}
-                      <div class="flex items-center gap-2 text-sm">
-                        <span
-                          class="badge {info.installed
-                            ? 'badge-success'
-                            : 'badge-ghost'}"
-                        >
-                          v{info.version_folder}
-                        </span>
-                        <span class="text-base-content/60">
-                          {info.installed ? "已安装" : "未安装"}
-                        </span>
+                      <div class="flex items-center gap-3">
+                        {#if info.text_installed || info.chat_installed}
+                          <span class="w-0.5 h-3.5 bg-success shrink-0"></span>
+                        {:else}
+                          <span class="w-0.5 h-3.5 bg-base-300 shrink-0"></span>
+                        {/if}
+                        <span class="text-xs text-base-content/40">v{info.version_folder}</span>
+                        {#if info.text_installed && info.chat_installed}
+                          <span class="text-xs text-base-content/30">文本反和谐，聊天反和谐</span>
+                        {:else if info.text_installed}
+                          <span class="text-xs text-base-content/30">文本反和谐</span>
+                        {:else if info.chat_installed}
+                          <span class="text-xs text-base-content/30">聊天反和谐</span>
+                        {:else}
+                          <span class="text-xs text-base-content/30">未安装</span>
+                        {/if}
                       </div>
                     {/each}
-                  </div>
-                {/if}
-              </div>
-
-              <div class="flex flex-col gap-2 shrink-0">
-                <button
-                  class="btn btn-ghost btn-xs"
-                  onclick={() => handleRefresh(inst.path)}
-                  title="刷新"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    class="h-4 w-4"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                    />
-                  </svg>
-                </button>
-              </div>
+                </div>
+              {/if}
             </div>
 
-            {#if inst.version_folders.length > 0}
-              <div class="card-actions mt-3">
-                <button
-                  class="btn btn-primary btn-sm"
-                  onclick={() => handleInstall(inst.path)}
-                  disabled={loading}
-                >
-                  {loading ? "安装中..." : "安装语言包"}
-                </button>
-              </div>
-            {/if}
+            <div class="flex items-center gap-2 shrink-0">
+              <button class="text-xs text-base-content/30 hover:text-base-content/60 transition-colors" onclick={() => handleRefresh(inst.path)} title="刷新">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+              {#if inst.version_folders.length > 0}
+                <div class="flex flex-col items-end gap-1">
+                  <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" class="w-3 h-3 accent-current" bind:checked={textAnticensor} />
+                    <span class="text-[11px] text-base-content/30">文本反和谐</span>
+                  </label>
+                  <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" class="w-3 h-3 accent-current" bind:checked={chatAnticensor} />
+                    <span class="text-[11px] text-base-content/30">聊天反和谐</span>
+                  </label>
+                  <button class="text-xs text-base-content/50 hover:text-base-content transition-colors" onclick={() => handleInstall(inst.path)} disabled={loading}>
+                    {loading ? "安装中…" : "安装"}
+                  </button>
+                </div>
+              {/if}
+            </div>
           </div>
+          <div class="border-b border-base-300 mt-3"></div>
         </div>
       {/each}
     </div>
@@ -302,35 +330,25 @@
 </main>
 
 {#if showAddModal}
-  <div class="modal modal-open">
-    <div class="modal-box">
-      <h3 class="text-lg font-bold mb-4">手动添加CN360实例</h3>
-      <p class="text-sm text-base-content/60 mb-4">
-        请输入战舰世界CN360客户端的安装目录（包含 wgc360_api.exe 和 bin 目录）。
-      </p>
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="fixed inset-0 bg-base-300/60 z-50 flex items-end justify-center pb-16" onclick={() => { showAddModal = false; manualPath = ""; addError = ""; }}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="w-full max-w-md bg-base-100 border border-base-300 px-6 py-5" onclick={(e) => e.stopPropagation()}>
+      <h3 class="text-sm mb-4">手动添加战舰世界国服实例</h3>
+      <p class="text-xs text-base-content/50 mb-4">输入战舰世界国服客户端的安装目录</p>
       <input
         type="text"
-        placeholder="例如：D:\Games\World of Warships 360"
-        class="input input-bordered w-full"
+        placeholder="例如 D:\Games\World of Warships 360"
+        class="w-full bg-transparent border border-base-300 px-3 py-2 text-sm text-base-content placeholder:text-base-content/30 focus:border-base-content/50 transition-colors"
         bind:value={manualPath}
-        onkeydown={(e: KeyboardEvent) => {
-          if (e.key === "Enter") handleAdd();
-        }}
+        onkeydown={(e: KeyboardEvent) => { if (e.key === "Enter") handleAdd(); }}
       />
       {#if addError}
-        <p class="text-error text-sm mt-2">{addError}</p>
+        <p class="text-xs text-error mt-2">{addError}</p>
       {/if}
-      <div class="modal-action">
-        <button class="btn btn-ghost" onclick={() => {
-          showAddModal = false;
-          manualPath = "";
-          addError = "";
-        }}>
-          取消
-        </button>
-        <button class="btn btn-primary" onclick={handleAdd}>
-          添加
-        </button>
+      <div class="flex justify-end gap-3 mt-5">
+        <button class="text-xs text-base-content/40 hover:text-base-content/60 transition-colors" onclick={() => { showAddModal = false; manualPath = ""; addError = ""; }}>取消</button>
+        <button class="text-xs text-base-content/70 hover:text-base-content transition-colors" onclick={handleAdd}>添加</button>
       </div>
     </div>
   </div>

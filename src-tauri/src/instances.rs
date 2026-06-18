@@ -59,7 +59,8 @@ pub struct InstanceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallationInfo {
     pub version_folder: String,
-    pub installed: bool,
+    pub text_installed: bool,
+    pub chat_installed: bool,
 }
 
 fn instances_file() -> PathBuf {
@@ -162,9 +163,13 @@ fn build_instance_info(path: &Path, normalized: &str) -> InstanceInfo {
     let version_folders = find_version_folders(path);
     let installations: Vec<InstallationInfo> = version_folders
         .iter()
-        .map(|vf| InstallationInfo {
-            installed: check_installed(path, vf),
-            version_folder: vf.clone(),
+        .map(|vf| {
+            let (text_installed, chat_installed) = check_components(path, vf);
+            InstallationInfo {
+                version_folder: vf.clone(),
+                text_installed,
+                chat_installed,
+            }
         })
         .collect();
 
@@ -233,7 +238,7 @@ pub fn find_version_folders(path: &Path) -> Vec<String> {
     numeric_dirs.iter().map(|n| n.to_string()).collect()
 }
 
-pub fn check_installed(instance_path: &Path, version_folder: &str) -> bool {
+pub fn check_components(instance_path: &Path, version_folder: &str) -> (bool, bool) {
     let info_path = instance_path
         .join("bin")
         .join(version_folder)
@@ -241,18 +246,21 @@ pub fn check_installed(instance_path: &Path, version_folder: &str) -> bool {
         .join("inst_info.json");
 
     if !info_path.is_file() {
-        return false;
+        return (false, false);
     }
 
     let content = match std::fs::read_to_string(&info_path) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return (false, false),
     };
 
     let info: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => return (false, false),
     };
+
+    let mut text_installed = false;
+    let mut chat_installed = false;
 
     if let Some(obj) = info.as_object() {
         for (relative_path, expected_sha256) in obj {
@@ -262,22 +270,27 @@ pub fn check_installed(instance_path: &Path, version_folder: &str) -> bool {
                 .join(relative_path);
 
             if !file_path.is_file() {
-                return false;
+                continue;
             }
 
             let actual_sha256 = match sha256_file(&file_path) {
                 Ok(h) => h,
-                Err(_) => return false,
+                Err(_) => continue,
             };
 
             if actual_sha256 != expected_sha256.as_str().unwrap_or("") {
-                return false;
+                continue;
+            }
+
+            if relative_path.contains("global.mo") {
+                text_installed = true;
+            } else if relative_path.contains("messenger_oldictionary.xml") {
+                chat_installed = true;
             }
         }
-        return true;
     }
 
-    false
+    (text_installed, chat_installed)
 }
 
 pub fn persist_instance_path(path: &str) -> Result<(), String> {
